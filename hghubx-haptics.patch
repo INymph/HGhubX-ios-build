@@ -1,0 +1,322 @@
+diff --git a/src/shared/ui/ui.tsx b/src/shared/ui/ui.tsx
+--- a/src/shared/ui/ui.tsx
++++ b/src/shared/ui/ui.tsx
+@@ -4,0 +5 @@
++import { hapticToggle } from "../lib/haptics";
+@@ -33 +34 @@
+-    <Button disabled={disabled} onClick={() => onChange(!on)} role="switch" aria-checked={on} aria-label={label}
++    <Button disabled={disabled} onClick={() => { hapticToggle(!on); onChange(!on); }} role="switch" aria-checked={on} aria-label={label}
+diff --git a/src/shared/ui/ios/controls.tsx b/src/shared/ui/ios/controls.tsx
+--- a/src/shared/ui/ios/controls.tsx
++++ b/src/shared/ui/ios/controls.tsx
+@@ -1 +1 @@
+-import { Children, forwardRef, type ButtonHTMLAttributes, type CSSProperties, type FormHTMLAttributes, type HTMLAttributes, type ImgHTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from "react";
++import { Children, forwardRef, type ButtonHTMLAttributes, type CSSProperties, type FormHTMLAttributes, type HTMLAttributes, type ImgHTMLAttributes, type InputHTMLAttributes, type PointerEvent as ReactPointerEvent, type TextareaHTMLAttributes } from "react";
+@@ -2,0 +3 @@
++import { hapticSelect, hapticSlide } from "../../lib/haptics";
+@@ -19 +20,2 @@
+-export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, ...props }, ref) {
++export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, onPointerDown, ...props }, ref) {
++  const range = props.type === "range";
+@@ -21,2 +23,4 @@
+-    data-ui={props.type === "range" ? "range" : "input"}
+-    className={cn(props.type === "range" ? "ios-range" : "ios-input", className)} />;
++    /* 滑块只在下手时给一次触感（haptics 内部再按 120ms 合并），拖动过程中不再逐格震。 */
++    onPointerDown={(e) => { if (range) hapticSlide(); onPointerDown?.(e); }}
++    data-ui={range ? "range" : "input"}
++    className={cn(range ? "ios-range" : "ios-input", className)} />;
+@@ -39,0 +44,8 @@
++  /* 只有真的换到另一段才给触感；点当前段、或者按住不放拖动，都不震。
++     pointerdown 先于 click 触发，此刻 activeIndex 还是旧值，比较才成立。 */
++  const onItemsDown = (e: ReactPointerEvent<HTMLSpanElement>) => {
++    const hit = (e.target as HTMLElement | null)?.closest(".ios-segmented-items > *");
++    if (!hit) return;
++    const tapped = Array.prototype.indexOf.call(e.currentTarget.children, hit);
++    if (tapped >= 0 && tapped !== index) hapticSelect();
++  };
+@@ -42 +54 @@
+-    <span className="ios-segmented-items">{segments}</span>
++    <span className="ios-segmented-items" onPointerDownCapture={onItemsDown}>{segments}</span>
+diff --git a/src/features/playback/PlayerControls.tsx b/src/features/playback/PlayerControls.tsx
+--- a/src/features/playback/PlayerControls.tsx
++++ b/src/features/playback/PlayerControls.tsx
+@@ -3,0 +4 @@
++import { haptic } from "../../shared/lib/haptics";
+@@ -83 +84 @@
+-        <Button className="player-control primary-play" aria-label={paused ? "播放" : "暂停"} data-tooltip={paused ? "播放 Space" : "暂停 Space"} onClick={onToggle}>
++        <Button className="player-control primary-play" aria-label={paused ? "播放" : "暂停"} data-tooltip={paused ? "播放 Space" : "暂停 Space"} onClick={() => { haptic(paused ? "medium" : "light"); onToggle(); }}>
+diff --git a/src/features/feed/FeedPlayerShellChrome.tsx b/src/features/feed/FeedPlayerShellChrome.tsx
+--- a/src/features/feed/FeedPlayerShellChrome.tsx
++++ b/src/features/feed/FeedPlayerShellChrome.tsx
+@@ -4,0 +5 @@
++import { haptic } from "../../shared/lib/haptics";
+@@ -229 +230 @@
+-            <Button onClick={() => videoRef.current?.toggle()} aria-label={paused ? "播放" : "暂停"}
++            <Button onClick={() => { haptic(paused ? "medium" : "light"); videoRef.current?.toggle(); }} aria-label={paused ? "播放" : "暂停"}
+diff --git a/src/features/feed/useFeedTouchGestures.ts b/src/features/feed/useFeedTouchGestures.ts
+--- a/src/features/feed/useFeedTouchGestures.ts
++++ b/src/features/feed/useFeedTouchGestures.ts
+@@ -6,0 +7 @@
++import { haptic } from "../../shared/lib/haptics";
+@@ -64,2 +65 @@
+-  /* 单击 / 双击判定：单击净屏，双击暂停 */
+-  const lastTapRef = useRef<{ timer: number | null; clean?: boolean; idle?: boolean }>({ timer: null });
++  /* 单击即播放/暂停（不再有双击窗口，故不保存上一击的状态） */
+@@ -146 +146 @@
+-        try { navigator.vibrate?.(25); } catch { /* ignore */ }
++        haptic("medium");
+@@ -270 +270 @@
+-            try { navigator.vibrate?.(12); } catch { /* ignore */ }
++            haptic("selection");
+@@ -279 +279 @@
+-          try { navigator.vibrate?.(12); } catch { /* ignore */ }
++          haptic("selection");
+@@ -285,20 +285,14 @@
+-    if (!cancelled && g.mode === "idle" && Date.now() - g.t < 260) {
+-      // 首击立即反馈；第二击恢复首击前的界面，再切换播放。
+-      if (lastTapRef.current.timer) {
+-        window.clearTimeout(lastTapRef.current.timer);
+-        lastTapRef.current.timer = null;
+-        setClean(lastTapRef.current.clean ?? false);
+-        if (!isDesktop && fs) setIdle(lastTapRef.current.idle ?? false);
+-        if (!isDesktop && fs && !lastTapRef.current.idle) arm();
+-        videoRef.current?.toggle();
+-      } else {
+-        lastTapRef.current.clean = clean;
+-        lastTapRef.current.idle = idle;
+-        setClean(!clean);
+-        if (!isDesktop && fs) setIdle(!idle);
+-        /* Re-arm the auto-hide timer whenever fullscreen controls become visible. */
+-        if (!isDesktop && fs) arm();
+-        lastTapRef.current.timer = window.setTimeout(() => {
+-          lastTapRef.current.timer = null;
+-        }, 230) as unknown as number;
+-      }
++    /* 单击 = 播放/暂停。原来的「单击净屏、双击暂停」已取消：
++       控件正隐藏时这一击只负责把控件唤回来，避免用户想调设置却先被暂停；
++       真正切换播放状态时才给触感（暂停给 light，继续播放给 medium）。 */
++    if (!cancelled && g.mode === "idle" && Date.now() - g.t < 320) {
++      if (clean || (fs && idle)) {
++        setClean(false);
++        if (!isDesktop && fs) { setIdle(false); arm(); }
++        haptic("selection");
++        return;
++      }
++      const wasPlaying = videoRef.current?.isPlayWanted() ?? false;
++      videoRef.current?.toggle();
++      haptic(wasPlaying ? "light" : "medium");
++      if (!isDesktop && fs) { setIdle(false); arm(); }
+@@ -314,2 +307,0 @@
+-      if (lastTapRef.current.timer) window.clearTimeout(lastTapRef.current.timer);
+-      lastTapRef.current.timer = null;
+@@ -323,2 +314,0 @@
+-    if (lastTapRef.current.timer) window.clearTimeout(lastTapRef.current.timer);
+-    lastTapRef.current.timer = null;
+diff --git a/src/features/feed/mobileHold.ts b/src/features/feed/mobileHold.ts
+--- a/src/features/feed/mobileHold.ts
++++ b/src/features/feed/mobileHold.ts
+@@ -0,0 +1,2 @@
++import { haptic } from "../../shared/lib/haptics";
++
+@@ -45 +47 @@
+-  try { navigator.vibrate?.(15); } catch { /* ignore */ }
++  haptic("light");
+diff --git a/src/features/feed/MobileHoldGuide.tsx b/src/features/feed/MobileHoldGuide.tsx
+--- a/src/features/feed/MobileHoldGuide.tsx
++++ b/src/features/feed/MobileHoldGuide.tsx
+@@ -104 +104 @@
+-      <p>双击暂停播放</p>
++      <p>单击暂停 / 继续播放</p>
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -4,0 +5,2 @@
++#[cfg(target_os = "ios")]
++mod ios_haptic;
+@@ -238,0 +241 @@
++            api::platform::haptic,
+diff --git a/src-tauri/src/api/platform.rs b/src-tauri/src/api/platform.rs
+--- a/src-tauri/src/api/platform.rs
++++ b/src-tauri/src/api/platform.rs
+@@ -56,0 +57,21 @@
++/// 触感反馈：iOS 用原生 `UIFeedbackGenerator`（WKWebView 里没有 `navigator.vibrate`）。
++/// 返回 `false` 表示本次没有走原生通道，前端据此回退到 Web Vibration，
++/// 保证同一个动作只震一次。iOS 的反馈发生器要求主线程，这里统一切过去。
++#[tauri::command]
++pub fn haptic(app: tauri::AppHandle, kind: String) -> Result<bool, String> {
++    #[cfg(target_os = "ios")]
++    {
++        let queued = app
++            .run_on_main_thread(move || {
++                crate::ios_haptic::play(&kind);
++            })
++            .is_ok();
++        Ok(queued)
++    }
++    #[cfg(not(target_os = "ios"))]
++    {
++        let _ = (&app, kind);
++        Ok(false)
++    }
++}
++
+diff --git a/src/shared/lib/haptics.ts b/src/shared/lib/haptics.ts
+new file mode 100644
+--- /dev/null
++++ b/src/shared/lib/haptics.ts
+@@ -0,0 +1,71 @@
++import { invoke } from "@tauri-apps/api/core";
++import { isIos } from "../api/api";
++
++/**
++ * 触感反馈。
++ *
++ * 这里统一收口，是因为仓库原来散落着 `navigator.vibrate?.()`：它在安卓 WebView 里能用，
++ * 在 iOS WKWebView 里根本不存在这个方法，iOS 用户一直是「点了没感觉」。
++ * 现在 iOS 走原生命令 `haptic`（`src-tauri/src/ios_haptic.rs`），其它平台仍用 Web Vibration。
++ */
++
++/** 反馈档位；与 `ios_haptic::play` 的字符串一一对应，不要单独改名。 */
++export type HapticKind = "light" | "medium" | "heavy" | "selection" | "success" | "warning" | "error";
++
++/** Web Vibration 回退时长（毫秒）。数值按手感调过，不要随意放大。 */
++const VIBRATE_MS: Record<HapticKind, number | number[]> = {
++  selection: 8,
++  light: 12,
++  medium: 22,
++  heavy: 32,
++  success: [10, 40, 12],
++  warning: 18,
++  error: [14, 46, 14],
++};
++
++/** 同类反馈的最小间隔：连点、拖动进度时要合并，否则会变成持续嗡嗡响。 */
++const MIN_GAP_MS = 45;
++
++let lastAt = 0;
++/** 原生通道失败一次就长期降级，避免每次交互都白跑一趟 IPC。 */
++let nativeBroken = false;
++
++function web(kind: HapticKind) {
++  try {
++    navigator.vibrate?.(VIBRATE_MS[kind]);
++  } catch {
++    /* 不支持的设备就当没有这回事，震动绝不能影响交互本身 */
++  }
++}
++
++/** 原生通道当前是否可用（只读，便于诊断与测试）。 */
++export function hapticNativeReady(): boolean {
++  return isIos && !nativeBroken;
++}
++
++/**
++ * 触发一次触感。
++ * @param kind 档位，默认 `light`
++ * @param gapMs 与上一次反馈的最小间隔；滑动类交互传更大的值（例如 120）来进一步降频
++ */
++export function haptic(kind: HapticKind = "light", gapMs = MIN_GAP_MS): void {
++  const now = typeof performance !== "undefined" ? performance.now() : Date.now();
++  if (now - lastAt < gapMs) return;
++  lastAt = now;
++  if (!hapticNativeReady()) {
++    web(kind);
++    return;
++  }
++  invoke<boolean>("haptic", { kind })
++    .then((native) => { if (!native) web(kind); })
++    .catch(() => { nativeBroken = true; web(kind); });
++}
++
++/** 开关类：打开用 `medium`（更有确认感），关闭用 `light`。 */
++export const hapticToggle = (on: boolean) => haptic(on ? "medium" : "light");
++
++/** 选项、Tab、分段控件切换：iOS 原生的 selection 质感。 */
++export const hapticSelect = () => haptic("selection", 60);
++
++/** 滑动连续取值（音量、进度、倍速拖动）：间隔拉到 120ms，按下与松手各一次。 */
++export const hapticSlide = () => haptic("selection", 120);
+diff --git a/src-tauri/src/ios_haptic.rs b/src-tauri/src/ios_haptic.rs
+new file mode 100644
+--- /dev/null
++++ b/src-tauri/src/ios_haptic.rs
+@@ -0,0 +1,79 @@
++//! iOS 触感反馈。
++//!
++//! WKWebView 没有 `navigator.vibrate`，前端原来的 `navigator.vibrate?.()` 在 iOS 上
++//! 一直是空调用；这里用 objc2 直接向 `UIFeedbackGenerator` 家族发消息，
++//! 不新增 crate 依赖，也不需要额外的 objc2-ui-kit 特性位。
++//!
++//! 调用方（`api::platform::haptic`）保证在本模块的函数里只做「触发一次」，
++//! 频次控制交给前端（`src/shared/lib/haptics.ts` 里 45ms 合并）。
++
++use objc2::rc::autoreleasepool;
++use objc2::runtime::AnyObject;
++use objc2::{class, msg_send};
++
++/// `UIImpactFeedbackStyle`：Light = 0，Medium = 1，Heavy = 2。
++fn impact(style: i64) -> bool {
++    unsafe {
++        let gen: *mut AnyObject = msg_send![class!(UIImpactFeedbackGenerator), alloc];
++        if gen.is_null() {
++            return false;
++        }
++        let gen: *mut AnyObject = msg_send![gen, initWithStyle: style];
++        if gen.is_null() {
++            return false;
++        }
++        let _: () = msg_send![gen, prepare];
++        let _: () = msg_send![gen, impactOccurred];
++        let _: () = msg_send![gen, release];
++    }
++    true
++}
++
++fn selection() -> bool {
++    unsafe {
++        let gen: *mut AnyObject = msg_send![class!(UISelectionFeedbackGenerator), alloc];
++        if gen.is_null() {
++            return false;
++        }
++        let gen: *mut AnyObject = msg_send![gen, init];
++        if gen.is_null() {
++            return false;
++        }
++        let _: () = msg_send![gen, prepare];
++        let _: () = msg_send![gen, selectionChanged];
++        let _: () = msg_send![gen, release];
++    }
++    true
++}
++
++/// `UINotificationFeedbackType`：Success = 0，Warning = 1，Error = 2。
++fn notification(kind: i64) -> bool {
++    unsafe {
++        let gen: *mut AnyObject = msg_send![class!(UINotificationFeedbackGenerator), alloc];
++        if gen.is_null() {
++            return false;
++        }
++        let gen: *mut AnyObject = msg_send![gen, init];
++        if gen.is_null() {
++            return false;
++        }
++        let _: () = msg_send![gen, prepare];
++        let _: () = msg_send![gen, notificationOccurred: kind];
++        let _: () = msg_send![gen, release];
++    }
++    true
++}
++
++/// 触发一次触感；未知档位按 `light` 处理，保证调用方不会因为拼错字符串而静默丢反馈。
++pub fn play(kind: &str) -> bool {
++    autoreleasepool(|_| match kind {
++        "selection" => selection(),
++        "light" => impact(0),
++        "medium" => impact(1),
++        "heavy" => impact(2),
++        "success" => notification(0),
++        "warning" => notification(1),
++        "error" => notification(2),
++        _ => impact(0),
++    })
++}
