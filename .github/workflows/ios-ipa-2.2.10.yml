@@ -1,0 +1,101 @@
+name: ios-ipa-2.2.10
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: upstream ref (tag or branch)
+        default: v2.2.10
+        required: true
+permissions:
+  contents: write
+env:
+  PATCH_URL: https://paste.rs/GISWv
+  PATCH_SHA: c7a676a5ef33ad961c9ff75a214d2bd7977e10087a91f3f7bac921bcfe2f0f18
+jobs:
+  build:
+    name: iOS unsigned ipa (patched 2.2.10)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "true"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      APPLE_DEVELOPMENT_TEAM: "ABCDE12345"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: zxsos/HGhubX
+          ref: ${{ inputs.upstream_ref }}
+          path: up
+          fetch-depth: 1
+      - name: fetch patch
+        run: |
+          curl -sSL --fail --retry 4 --retry-all-errors -o hghubx-haptics.patch "$PATCH_URL"
+          echo "${PATCH_SHA}  hghubx-haptics.patch" | shasum -a 256 -c -
+          wc -l hghubx-haptics.patch
+      - name: apply patch
+        working-directory: up
+        run: |
+          git apply --check ../hghubx-haptics.patch
+          git apply ../hghubx-haptics.patch
+          test -n "$(git status --porcelain)"
+          git --no-pager diff --stat
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: up/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          workspaces: up/src-tauri -> target
+          key: ios-2210
+      - name: install deps
+        working-directory: up
+        run: pnpm install --frozen-lockfile
+      - name: ios init
+        working-directory: up
+        run: |
+          pnpm tauri ios init --ci
+          for plist in $(find src-tauri/gen/apple -name "Info.plist" 2>/dev/null); do
+            for key in "UISupportedInterfaceOrientations" "UISupportedInterfaceOrientations~iphone" "UISupportedInterfaceOrientations~ipad"; do
+              /usr/libexec/PlistBuddy -c "Delete :${key}" "$plist" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Add :${key} array" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:0 string UIInterfaceOrientationPortrait" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:1 string UIInterfaceOrientationLandscapeLeft" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:2 string UIInterfaceOrientationLandscapeRight" "$plist"
+            done
+            /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$plist"
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$plist"
+          done
+      - name: build ipa
+        working-directory: up
+        shell: bash
+        run: |
+          V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "building HGhubX $V"
+          bash scripts/build-ios-unsigned.sh "$V"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HGhubX-haptics-2210-ipa
+          path: |
+            up/artifacts/*.ipa
+            up/ios-build-session.log
+          if-no-files-found: error
+      - name: persist patch in repo
+        continue-on-error: true
+        run: |
+          if [ -f hghubx-haptics-2.2.10.patch ]; then exit 0; fi
+          cp hghubx-haptics.patch hghubx-haptics-2.2.10.patch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hghubx-haptics-2.2.10.patch
+          git commit -m "ci(ios): persist 2.2.10 haptics patch"
+          git push
