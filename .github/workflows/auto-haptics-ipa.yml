@@ -1,0 +1,150 @@
+name: auto-haptics-ipa
+# 每天检查 zxsos/HGhubX 是否有新 tag；有就重放「触感 + 单击暂停」改动并构建未签名 IPA，
+# 挂到 Release（tag = haptics-<版本>）供手机直接下载。
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 指定 tag（留空 = 自动取最新）
+        default: ""
+        required: false
+      force:
+        description: 强制重建（即使该版本已构建过）
+        type: boolean
+        default: false
+permissions:
+  contents: write
+env:
+  SCRIPT_URL: https://paste.rs/mZ7Bs
+  SCRIPT_SHA: 7b762175c94e089e0534ded72cf3c7211720ad35e13498e0e394cc1d6683353c
+jobs:
+  auto:
+    name: check -> patch -> build -> release
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "true"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      APPLE_DEVELOPMENT_TEAM: "ABCDE12345"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: resolve upstream tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.upstream_ref }}" ]; then
+            TAG="${{ inputs.upstream_ref }}"
+          else
+            TAG=$(git ls-remote --tags --refs https://github.com/zxsos/HGhubX.git \
+                  | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          fi
+          if [ -z "$TAG" ]; then echo "无法解析上游 tag"; exit 1; fi
+          LAST=$(cat last-built.txt 2>/dev/null | tr -d '[:space:]' || true)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+          FORCE="${{ inputs.force }}"
+          if [ "$TAG" = "$LAST" ] && [ "$FORCE" != "true" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "upstream=$TAG  last_built=${LAST:-none}"
+      - name: checkout upstream
+        if: steps.tag.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: zxsos/HGhubX
+          ref: ${{ steps.tag.outputs.tag }}
+          path: up
+          fetch-depth: 1
+      - name: fetch apply script
+        if: steps.tag.outputs.skip == 'false'
+        run: |
+          mkdir -p scripts
+          if [ -f scripts/apply-haptics.py ]; then
+            echo "using persisted script from repo"
+          else
+            curl -sSL --fail --retry 4 --retry-all-errors -o scripts/apply-haptics.py "$SCRIPT_URL"
+            echo "${SCRIPT_SHA}  scripts/apply-haptics.py" | shasum -a 256 -c -
+          fi
+      - name: apply haptics patch
+        if: steps.tag.outputs.skip == 'false'
+        run: |
+          python3 scripts/apply-haptics.py up
+          cd up && git status --porcelain | tee /tmp/changed.txt
+          test -s /tmp/changed.txt
+      - uses: pnpm/action-setup@v6
+        if: steps.tag.outputs.skip == 'false'
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        if: steps.tag.outputs.skip == 'false'
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: up/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.tag.outputs.skip == 'false'
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2
+        if: steps.tag.outputs.skip == 'false'
+        continue-on-error: true
+        with:
+          workspaces: up/src-tauri -> target
+          key: ios-auto
+      - name: install deps
+        if: steps.tag.outputs.skip == 'false'
+        working-directory: up
+        run: pnpm install --frozen-lockfile
+      - name: ios init
+        if: steps.tag.outputs.skip == 'false'
+        working-directory: up
+        run: |
+          pnpm tauri ios init --ci
+          for plist in $(find src-tauri/gen/apple -name "Info.plist" 2>/dev/null); do
+            for key in "UISupportedInterfaceOrientations" "UISupportedInterfaceOrientations~iphone" "UISupportedInterfaceOrientations~ipad"; do
+              /usr/libexec/PlistBuddy -c "Delete :${key}" "$plist" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Add :${key} array" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:0 string UIInterfaceOrientationPortrait" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:1 string UIInterfaceOrientationLandscapeLeft" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:2 string UIInterfaceOrientationLandscapeRight" "$plist"
+            done
+            /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$plist"
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$plist"
+          done
+      - name: build ipa
+        if: steps.tag.outputs.skip == 'false'
+        working-directory: up
+        shell: bash
+        run: |
+          V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "building HGhubX $V"
+          bash scripts/build-ios-unsigned.sh "$V"
+      - name: publish release
+        if: steps.tag.outputs.skip == 'false'
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          IPA=$(ls up/artifacts/*.ipa | head -1)
+          NAME="HGhubX_${TAG}_haptics_unsigned.ipa"
+          cp "$IPA" "$NAME"
+          NOTES=$(printf '上游 %s 的「原生触感 + 单击暂停」构建。\n\n- 未签名，用 Sideloadly / AltStore / TrollStore 自签安装\n- 开关：开 medium / 关 light；Tab、滑块：selection\n- 画面单击即暂停/继续\n- 产物 sha256 见本页资产' "$TAG")
+          if gh release view "haptics-$TAG" >/dev/null 2>&1; then
+            gh release upload "haptics-$TAG" "$NAME" --clobber
+          else
+            gh release create "haptics-$TAG" "$NAME" --title "HGhubX $TAG · 触感增强" --notes "$NOTES"
+          fi
+          shasum -a 256 "$NAME"
+      - name: record built tag
+        if: steps.tag.outputs.skip == 'false'
+        run: |
+          echo "${{ steps.tag.outputs.tag }}" > last-built.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-built.txt scripts/apply-haptics.py
+          git diff --cached --quiet && echo "nothing to commit" && exit 0
+          git commit -m "chore(build): record ${{ steps.tag.outputs.tag }} and persist apply script"
+          git push
